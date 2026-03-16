@@ -1,0 +1,45 @@
+# Origin 1.7 Example Script
+
+print "--- Origin Script Start ---"
+
+# Variables & Constants
+let sweep_delay: int = 100
+const max_angle: int = 180
+
+# Hardware control map to Sentinel
+set servo[0] = angle, 0
+wait sweep_delay
+set servo[0] = angle, max_angle
+wait sweep_delay
+
+# Arrays and Loops
+let positions: list = [0, 45, 90, 135, 180]
+for idx in range(0, len(positions)) {
+    let target: int = positions[idx]
+    set servo[1] = angle, target
+}
+
+# Math mapping
+import math
+let val: float = math.sqrt(16)
+print "Square root of 16 is: " + str(val)
+
+# Functions
+def move_home() {
+    print "Moving home..."
+    set servo.angle 0, 90
+    set servo.angle 1, 90
+}
+move_home()
+
+# Try/Except
+try {
+    let x: int = 1
+    x = "error"
+} except {
+    print "Caught error: " + error.message
+} else {
+    print "No error"
+}
+
+print "--- Origin Script End ---"
