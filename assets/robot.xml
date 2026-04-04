@@ -1,0 +1,40 @@
+<mujoco model="simple_robot">
+  <compiler angle="radian"/>
+  <option gravity="0 0 -9.81" timestep="0.005"/>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512"/>
+    <texture name="plane" type="2d" builtin="checker" rgb1="0.2 0.3 0.4" rgb2="0.1 0.15 0.2" width="512" height="512"/>
+    <material name="plane" texture="plane" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+  
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="0 0 .1" material="plane"/>
+    
+    <body name="base_link" pos="0 0 0.2">
+      <freejoint name="root_freejoint"/>
+      <geom type="box" size="0.1 0.075 0.025" rgba="0 0 0.8 1" mass="1.0"/>
+      
+      <body name="left_wheel" pos="0.05 0.095 0">
+        <joint name="left_wheel_joint" type="hinge" axis="0 1 0"/>
+        <geom type="sphere" size="0.04" rgba="0 0 0 1" mass="0.5"/>
+      </body>
+      
+      <body name="right_wheel" pos="0.05 -0.095 0">
+        <joint name="right_wheel_joint" type="hinge" axis="0 1 0"/>
+        <geom type="sphere" size="0.04" rgba="0 0 0 1" mass="0.5"/>
+      </body>
+    </body>
+  </worldbody>
+  
+  <actuator>
+    <!-- We use velocity actuators for velocity control -->
+    <velocity name="left_wheel_motor" joint="left_wheel_joint" kv="0.1"/>
+    <velocity name="right_wheel_motor" joint="right_wheel_joint" kv="0.1"/>
+  </actuator>
+  
+  <contact>
+    <exclude body1="base_link" body2="left_wheel"/>
+    <exclude body1="base_link" body2="right_wheel"/>
+  </contact>
+</mujoco>
