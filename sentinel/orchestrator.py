@@ -5,93 +5,199 @@ import math
 import random
 import sys
 import pygame
+from typing import Dict, List, Optional, Tuple
+
 from sentinel.backends.sim_mujoco import SimBackend
 from sentinel.controllers.robot_controller import RobotController
 from sentinel.bus import SwarmBus
+from sentinel import config
 
 def sim_robot_worker(robot_id: int, shared_dict: dict, urdf_path: str, start_pos: tuple):
     """Entry point for a single robot simulation process."""
     # Headless mode for all workers
-    backend = SimBackend(xml_path=urdf_path, headless=True, start_pos=start_pos)
+    backend = SimBackend(robot_id=robot_id, xml_path=urdf_path, headless=True, start_pos=start_pos)
     bus = SwarmBus(shared_dict)
     
     robot = RobotController(robot_id=robot_id, backend=backend, swarm_bus=bus)
+    robot.initialize()
     
     tick = 0
     start_time = time.time()
     
     try:
         while True:
+            # Check for global goal in shared dictionary
+            goal = shared_dict.get('goal')
+            if goal:
+                robot.boids.set_goal(goal)
+            
+            # Control loop
             robot.step()
-            backend.step_simulation()
             
-            # Realtime lock
-            time_until_next_step = backend.model.opt.timestep - (time.time() - start_time)
-            if time_until_next_step > 0:
-                time.sleep(time_until_next_step)
+            # Realtime sync
+            elapsed = time.time() - start_time
+            # Target timestep from config or backend
+            target_dt = 1.0 / config.SIM_TICK_RATE
+            sleep_time = target_dt - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            
             start_time = time.time()
-            
             tick += 1
     except KeyboardInterrupt:
         pass
+    finally:
+        robot.shutdown()
 
 class SentinelOrchestrator:
-    def __init__(self, n_sim=9, visualize=True):
+    def __init__(self, n_sim=config.DEFAULT_N_SIM, visualize=True):
         self.n_sim = n_sim
         self.manager = multiprocessing.Manager()
         self.shared_dict = self.manager.dict()
         self.bus = SwarmBus(self.shared_dict)
         self.processes = []
         
+        # UI State
         self.visualize = visualize
+        self.goal: Optional[Tuple[float, float]] = None
+        self.trails: Dict[int, List[Tuple[int, int]]] = {i: [] for i in range(n_sim)}
+        self.max_trail_len = 20
+        
         if self.visualize:
             pygame.init()
-            self.screen = pygame.display.set_mode((800, 800))
-            pygame.display.set_caption("Sentinel Swarm Dashboard")
-            self.font = pygame.font.SysFont("Arial", 16)
+            self.screen = pygame.display.set_mode(config.WINDOW_SIZE)
+            pygame.display.set_caption("SENTINEL | Swarm Command & Control")
+            self.font_main = pygame.font.SysFont("Verdana", 14)
+            self.font_header = pygame.font.SysFont("Verdana", 18, bold=True)
+            self.font_logo = pygame.font.SysFont("Verdana", 24, bold=True)
         
         current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.model_path = os.path.join(current_dir, "assets", "robot.xml")
 
+    def _world_to_px(self, pos: Tuple[float, float]) -> Tuple[int, int]:
+        """Map physical bounds (-10 to 10) to screen pixel coordinates."""
+        # Simple mapping assuming center is (500, 400) for 1000x800
+        # Let's use a scale factor
+        scale = config.WINDOW_SIZE[0] / 20.0 # 50px per unit
+        offset_x = config.WINDOW_SIZE[0] // 2
+        offset_y = config.WINDOW_SIZE[1] // 2
+        
+        px_x = int(pos[0] * scale + offset_x)
+        px_y = int(-pos[1] * scale + offset_y)
+        return (px_x, px_y)
+
+    def _px_to_world(self, px: Tuple[int, int]) -> Tuple[float, float]:
+        scale = config.WINDOW_SIZE[0] / 20.0
+        offset_x = config.WINDOW_SIZE[0] // 2
+        offset_y = config.WINDOW_SIZE[1] // 2
+        
+        wx = (px[0] - offset_x) / scale
+        wy = -(px[1] - offset_y) / scale
+        return (wx, wy)
+
     def draw_dashboard(self):
-        self.screen.fill((30, 30, 30))
+        self.screen.fill(config.COLOR_BG)
         
-        # Grid
-        for i in range(11):
-            pygame.draw.line(self.screen, (50, 50, 50), (0, i * 80), (800, i * 80))
-            pygame.draw.line(self.screen, (50, 50, 50), (i * 80, 0), (i * 80, 800))
-        
+        # 1. Draw Grid
+        grid_step = config.GRID_SIZE
+        for x in range(0, config.WINDOW_SIZE[0], grid_step):
+            pygame.draw.line(self.screen, config.COLOR_GRID, (x, 0), (x, config.WINDOW_SIZE[1]), 1)
+        for y in range(0, config.WINDOW_SIZE[1], grid_step):
+            pygame.draw.line(self.screen, config.COLOR_GRID, (0, y), (config.WINDOW_SIZE[0], y), 1)
+
+        # 2. Draw Goal Point
+        if self.goal:
+            g_px = self._world_to_px(self.goal)
+            # Pulse effect or static marker
+            pygame.draw.circle(self.screen, config.COLOR_GOAL, g_px, 8, 2)
+            pygame.draw.circle(self.screen, config.COLOR_GOAL, g_px, 2)
+
+        # 3. Draw Robots
+        swarm_positions = []
         for r_id in range(self.n_sim):
             s = self.shared_dict.get(r_id)
-            if s:
-                # Map physical bounds (say -5 to 5) to 800x800 screen
-                x_px = int((s.position[0] + 5.0) * (800.0 / 10.0))
-                # Pygame Y is inverted relative to standard math
-                y_px = int((-s.position[1] + 5.0) * (800.0 / 10.0))
-                
-                # Draw robot circle
-                pygame.draw.circle(self.screen, (0, 150, 250), (x_px, y_px), 12)
-                
-                # Draw heading vector
-                # Heading in world coordinates has +Y up, PyGame has +Y down
-                # So we negate the Y component of the heading vector
-                end_x = x_px + int(25 * math.cos(s.heading))
-                end_y = y_px - int(25 * math.sin(s.heading))
-                pygame.draw.line(self.screen, (255, 100, 100), (x_px, y_px), (end_x, end_y), 3)
-                
-                # Draw Label
-                txt = self.font.render(f"{r_id}", True, (255, 255, 255))
-                self.screen.blit(txt, (x_px + 15, y_px - 15))
-                
+            if not s:
+                continue
+            
+            swarm_positions.append(s.position)
+            px = self._world_to_px(s.position)
+            
+            # Update and draw trails
+            self.trails[r_id].append(px)
+            if len(self.trails[r_id]) > self.max_trail_len:
+                self.trails[r_id].pop(0)
+            
+            if len(self.trails[r_id]) > 1:
+                pygame.draw.lines(self.screen, config.COLOR_GRID, False, self.trails[r_id], 1)
+
+            # Draw robot glow (layers)
+            for r in range(16, 8, -2):
+                alpha = int(100 * (1 - r/16))
+                surface = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
+                pygame.draw.circle(surface, (*config.COLOR_ROBOT_GLOW, alpha), (r, r), r)
+                self.screen.blit(surface, (px[0]-r, px[1]-r))
+
+            # Core
+            pygame.draw.circle(self.screen, config.COLOR_ROBOT, px, 6)
+            
+            # Heading Indicator
+            h_len = 15
+            h_end = (
+                px[0] + int(h_len * math.cos(s.heading)),
+                px[1] - int(h_len * math.sin(s.heading))
+            )
+            pygame.draw.line(self.screen, config.COLOR_HEADING, px, h_end, 2)
+
+        # 4. Draw GUI Overlay / Telemetry
+        # Semi-transparent overlay for sidebar
+        sidebar_w = 220
+        sidebar_bg = pygame.Surface((sidebar_w, config.WINDOW_SIZE[1]), pygame.SRCALPHA)
+        sidebar_bg.fill((10, 15, 25, 200))
+        self.screen.blit(sidebar_bg, (0, 0))
+        
+        y_off = 20
+        # Logo
+        logo = self.font_logo.render("SENTINEL", True, config.COLOR_ROBOT)
+        self.screen.blit(logo, (20, y_off))
+        y_off += 40
+        
+        # Telemetry
+        header = self.font_header.render("SWARM STATUS", True, config.COLOR_TEXT)
+        self.screen.blit(header, (20, y_off))
+        y_off += 30
+        
+        self.screen.blit(self.font_main.render(f"Robots: {self.n_sim}", True, config.COLOR_TEXT), (20, y_off))
+        y_off += 20
+        
+        if swarm_positions:
+            avg_x = sum(p[0] for p in swarm_positions) / len(swarm_positions)
+            avg_y = sum(p[1] for p in swarm_positions) / len(swarm_positions)
+            dispersion = sum(math.hypot(p[0]-avg_x, p[1]-avg_y) for p in swarm_positions) / len(swarm_positions)
+            
+            self.screen.blit(self.font_main.render(f"Centroid: {avg_x:.1f}, {avg_y:.1f}", True, config.COLOR_TEXT), (20, y_off))
+            y_off += 20
+            self.screen.blit(self.font_main.render(f"Dispersion: {dispersion:.2f}", True, config.COLOR_TEXT), (20, y_off))
+            y_off += 20
+        
+        y_off += 20
+        goal_status = "SET" if self.goal else "IDLE"
+        self.screen.blit(self.font_main.render(f"Mode: {goal_status}", True, config.COLOR_GOAL if self.goal else config.COLOR_TEXT), (20, y_off))
+        
+        # Footnote
+        self.screen.blit(self.font_main.render("Click grid to set GOAL", True, (100, 110, 120)), (20, config.WINDOW_SIZE[1]-40))
+
         pygame.display.flip()
 
     def run(self, ticks_to_run: int = -1):
         print(f"Spawning {self.n_sim} sim robots...")
         
-        # Spawn randomized positions in a smaller physical bounds so they stay on screen
+        # Clean startup: Clear shared dict
+        self.shared_dict.clear()
+        
+        # Spawn randomized positions
         for i in range(self.n_sim):
-            sx = random.uniform(-3.0, 3.0)
-            sy = random.uniform(-3.0, 3.0)
+            sx = random.uniform(-4.0, 4.0)
+            sy = random.uniform(-4.0, 4.0)
             p = multiprocessing.Process(
                 target=sim_robot_worker, 
                 args=(i, self.shared_dict, self.model_path, (sx, sy))
@@ -99,7 +205,7 @@ class SentinelOrchestrator:
             self.processes.append(p)
             p.start()
             
-        print("Swarm simulation running! Notice: PyGame dashboard is active.")
+        print("Swarm simulation running! Click the dashboard to set objectives.")
         
         tick = 0
         clock = pygame.time.Clock() if self.visualize else None
@@ -111,23 +217,39 @@ class SentinelOrchestrator:
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             running = False
-                    
+                        
+                        elif event.type == pygame.MOUSEBUTTONDOWN:
+                            # Handle goal setting
+                            self.goal = self._px_to_world(event.pos)
+                            self.shared_dict['goal'] = self.goal
+                            print(f"Global Goal Updated: {self.goal}")
+                            
+                        elif event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_r: # Reset goal
+                                self.goal = None
+                                if 'goal' in self.shared_dict:
+                                    del self.shared_dict['goal']
+                                print("Goal Reset")
+
                     self.draw_dashboard()
-                    clock.tick(60) # 60 FPS update for dashboard
+                    clock.tick(config.SIM_TICK_RATE) 
                 else:
-                    time.sleep(0.1)
+                    time.sleep(1.0/config.SIM_TICK_RATE)
                 
                 tick += 1
                 
         except KeyboardInterrupt:
             print("\nKeyboard Interrupt caught.")
         finally:
-            print("Shutting down swarm processes...")
-            if self.visualize:
-                pygame.quit()
-            for p in self.processes:
-                if p.is_alive():
-                    p.terminate()
-            for p in self.processes:
-                p.join()
-            print("Shutdown complete.")
+            self.shutdown()
+
+    def shutdown(self):
+        print("Shutting down swarm processes...")
+        if self.visualize:
+            pygame.quit()
+        for p in self.processes:
+            if p.is_alive():
+                p.terminate()
+        for p in self.processes:
+            p.join(timeout=1.0)
+        print("Shutdown complete.")
